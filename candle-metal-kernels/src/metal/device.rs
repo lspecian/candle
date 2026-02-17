@@ -140,9 +140,10 @@ impl Device {
         path: &std::path::Path,
     ) -> Result<Library, MetalKernelError> {
         let path_str = path.to_string_lossy();
-        let url_str = format!("file://{}", path_str);
-        let ns_url_str = NSString::from_str(&url_str);
-        let url = NSURL::URLWithString(&ns_url_str)
+        // Use from_file_path which correctly handles paths with spaces
+        // and special characters (unlike URLWithString which requires
+        // percent-encoding). This matches how candle-core handles file URLs.
+        let url = NSURL::from_file_path(path)
             .ok_or_else(|| MetalKernelError::LoadLibraryError(
                 format!("Invalid metallib path: {}", path_str),
             ))?;

@@ -103,7 +103,9 @@ impl Kernels {
     /// done
     /// ```
     pub fn set_metallib_dir(&self, path: impl Into<PathBuf>) {
-        *self.metallib_dir.write().unwrap() = Some(path.into());
+        let path = path.into();
+        eprintln!("[Candle] set_metallib_dir: {}", path.display());
+        *self.metallib_dir.write().unwrap() = Some(path);
     }
 
     fn get_library_source(&self, source: Source) -> &'static str {
@@ -167,10 +169,19 @@ impl Kernels {
     ) -> Option<Result<Library, MetalKernelError>> {
         let dir_guard = self.metallib_dir.read().ok()?;
         let dir = dir_guard.as_ref()?;
-        let path = dir.join(source.metallib_filename());
+        let filename = source.metallib_filename();
+        let path = dir.join(filename);
         if path.exists() {
-            Some(device.new_library_with_url(&path))
+            eprintln!("[Candle] Loading pre-compiled metallib: {}", path.display());
+            let result = device.new_library_with_url(&path);
+            if let Err(ref e) = result {
+                eprintln!("[Candle] FAILED to load metallib {}: {}", filename, e);
+            } else {
+                eprintln!("[Candle] OK loaded metallib: {}", filename);
+            }
+            Some(result)
         } else {
+            eprintln!("[Candle] metallib not found: {} (dir={})", path.display(), dir.display());
             None
         }
     }
@@ -181,11 +192,17 @@ impl Kernels {
         device: &Device,
         source: Source,
     ) -> Result<Library, MetalKernelError> {
+        eprintln!("[Candle] Compiling {:?} from source (runtime XPC compilation)...", source);
         let source_content = self.get_library_source(source);
         let compile_options = get_compile_options();
-        device
+        let result = device
             .new_library_with_source(source_content, Some(&compile_options))
-            .map_err(|e| MetalKernelError::LoadLibraryError(e.to_string()))
+            .map_err(|e| MetalKernelError::LoadLibraryError(e.to_string()));
+        match &result {
+            Ok(_) => eprintln!("[Candle] Compiled {:?} OK", source),
+            Err(e) => eprintln!("[Candle] FAILED to compile {:?}: {}", source, e),
+        }
+        result
     }
 
     fn load_function(
