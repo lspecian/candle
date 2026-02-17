@@ -10,6 +10,7 @@ use crate::{
 use objc2::available;
 use objc2::rc::Retained;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,10 @@ type Pipelines = HashMap<(KernelName, Option<ConstantValues>), ComputePipeline>;
 pub struct Kernels {
     libraries: RwLock<Libraries>,
     pipelines: RwLock<Pipelines>,
+    /// Optional directory containing pre-compiled .metallib files.
+    /// When set, `load_library` tries loading from here before falling back
+    /// to runtime source compilation.
+    metallib_dir: RwLock<Option<PathBuf>>,
 }
 
 impl Default for Kernels {
@@ -80,7 +85,25 @@ impl Kernels {
         Self {
             libraries,
             pipelines,
+            metallib_dir: RwLock::new(None),
         }
+    }
+
+    /// Set the directory containing pre-compiled `.metallib` files.
+    ///
+    /// When set, `load_library` will attempt to load the pre-compiled binary
+    /// before falling back to runtime source compilation. This eliminates
+    /// XPC-based shader compilation, which is critical for iOS reliability.
+    ///
+    /// Build metallib files from the Metal sources with:
+    /// ```sh
+    /// for f in *.metal; do
+    ///   xcrun -sdk iphoneos metal -c "$f" -o "${f%.metal}.air"
+    ///   xcrun -sdk iphoneos metallib "${f%.metal}.air" -o "${f%.metal}.metallib"
+    /// done
+    /// ```
+    pub fn set_metallib_dir(&self, path: impl Into<PathBuf>) {
+        *self.metallib_dir.write().unwrap() = Some(path.into());
     }
 
     fn get_library_source(&self, source: Source) -> &'static str {
@@ -103,8 +126,12 @@ impl Kernels {
         }
     }
 
-    /// Load the give library from its [`source`].
+    /// Load the given library from its [`source`].
     /// If this has been previously loaded it will just fetch it from cache.
+    ///
+    /// When a `metallib_dir` is configured, tries loading the pre-compiled
+    /// `.metallib` first. Falls back to runtime source compilation if the
+    /// metallib is not found or fails to load.
     pub fn load_library(
         &self,
         device: &Device,
@@ -114,16 +141,51 @@ impl Kernels {
         if let Some(lib) = libraries.get(&source) {
             Ok(lib.clone())
         } else {
-            let lib = {
-                let source_content = self.get_library_source(source);
-                let compile_options = get_compile_options();
-                device
-                    .new_library_with_source(source_content, Some(&compile_options))
-                    .map_err(|e| MetalKernelError::LoadLibraryError(e.to_string()))?
+            // Try pre-compiled metallib first
+            let metallib_result = self.try_load_metallib(device, source);
+            let lib = match metallib_result {
+                Some(Ok(lib)) => lib,
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        "Failed to load pre-compiled metallib for {:?}: {}, falling back to source compilation",
+                        source, e
+                    );
+                    self.compile_from_source(device, source)?
+                }
+                None => self.compile_from_source(device, source)?,
             };
             libraries.insert(source, lib.clone());
             Ok(lib)
         }
+    }
+
+    /// Try loading a pre-compiled .metallib file if a metallib_dir is set.
+    fn try_load_metallib(
+        &self,
+        device: &Device,
+        source: Source,
+    ) -> Option<Result<Library, MetalKernelError>> {
+        let dir_guard = self.metallib_dir.read().ok()?;
+        let dir = dir_guard.as_ref()?;
+        let path = dir.join(source.metallib_filename());
+        if path.exists() {
+            Some(device.new_library_with_url(&path))
+        } else {
+            None
+        }
+    }
+
+    /// Compile a library from embedded Metal source.
+    fn compile_from_source(
+        &self,
+        device: &Device,
+        source: Source,
+    ) -> Result<Library, MetalKernelError> {
+        let source_content = self.get_library_source(source);
+        let compile_options = get_compile_options();
+        device
+            .new_library_with_source(source_content, Some(&compile_options))
+            .map_err(|e| MetalKernelError::LoadLibraryError(e.to_string()))
     }
 
     fn load_function(

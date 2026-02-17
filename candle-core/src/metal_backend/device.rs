@@ -123,6 +123,16 @@ impl MetalDevice {
         &self.device
     }
 
+    /// Set the directory containing pre-compiled `.metallib` files.
+    ///
+    /// When set, kernel loading will try the pre-compiled binary first before
+    /// falling back to runtime source compilation. This is critical on iOS
+    /// where runtime shader compilation can fail with
+    /// `XPC_ERROR_CONNECTION_INTERRUPTED` under memory pressure.
+    pub fn set_metallib_dir(&self, path: impl Into<std::path::PathBuf>) {
+        self.kernels.set_metallib_dir(path);
+    }
+
     fn drop_unused_buffers(&self) -> Result<()> {
         let mut buffers = self.buffers.write().map_err(MetalError::from)?;
         for subbuffers in buffers.values_mut() {

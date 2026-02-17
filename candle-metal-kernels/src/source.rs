@@ -32,3 +32,26 @@ pub enum Source {
     Unary,
     Sdpa,
 }
+
+impl Source {
+    /// Returns the metallib filename for this source (e.g. "quantized.metallib").
+    pub fn metallib_filename(&self) -> &'static str {
+        match self {
+            Source::Affine => "affine.metallib",
+            Source::Binary => "binary.metallib",
+            Source::Cast => "cast.metallib",
+            Source::Conv => "conv.metallib",
+            Source::Fill => "fill.metallib",
+            Source::Gemm => "mlx_gemm.metallib",
+            Source::Indexing => "indexing.metallib",
+            Source::MlxSort => "mlx_sort.metallib",
+            Source::Quantized => "quantized.metallib",
+            Source::Random => "random.metallib",
+            Source::Reduce => "reduce.metallib",
+            Source::Sort => "sort.metallib",
+            Source::Ternary => "ternary.metallib",
+            Source::Unary => "unary.metallib",
+            Source::Sdpa => "scaled_dot_product_attention.metallib",
+        }
+    }
+}

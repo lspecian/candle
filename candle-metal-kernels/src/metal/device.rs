@@ -2,7 +2,7 @@ use crate::{
     Buffer, CommandQueue, ComputePipeline, Function, Library, MTLResourceOptions, MetalKernelError,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSString, NSURL};
 use objc2_metal::{MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice};
 use std::{ffi::c_void, ptr};
 
@@ -88,15 +88,71 @@ impl Device {
         }
     }
 
+    /// Compile a Metal library from source, retrying on transient XPC failures.
+    ///
+    /// On iOS the Metal shader compiler runs in an XPC service
+    /// (`com.apple.MTLCompilerService`). Under memory pressure iOS can kill
+    /// this service, producing `XPC_ERROR_CONNECTION_INTERRUPTED`. The service
+    /// restarts automatically, so a retry after a short delay usually succeeds.
     pub fn new_library_with_source(
         &self,
         source: &str,
         options: Option<&MTLCompileOptions>,
     ) -> Result<Library, MetalKernelError> {
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+        let mut last_err = None;
+        for attempt in 0..MAX_RETRIES {
+            match self
+                .as_ref()
+                .newLibraryWithSource_options_error(&NSString::from_str(source), options)
+            {
+                Ok(raw) => return Ok(Library::new(raw)),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if attempt + 1 < MAX_RETRIES && msg.contains("XPC") {
+                        tracing::warn!(
+                            "Metal shader compilation failed (attempt {}/{}): {}, retrying...",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            msg
+                        );
+                        std::thread::sleep(RETRY_DELAY);
+                    }
+                    last_err = Some(msg);
+                }
+            }
+        }
+        Err(MetalKernelError::LoadLibraryError(last_err.unwrap_or_default()))
+    }
+
+    /// Load a pre-compiled Metal library (.metallib) from a file path.
+    ///
+    /// Pre-compiled libraries bypass runtime shader compilation entirely,
+    /// avoiding XPC failures on iOS. Build metallib files with:
+    /// ```sh
+    /// xcrun -sdk iphoneos metal -c shader.metal -o shader.air
+    /// xcrun -sdk iphoneos metallib shader.air -o shader.metallib
+    /// ```
+    pub fn new_library_with_url(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Library, MetalKernelError> {
+        let path_str = path.to_string_lossy();
+        let url_str = format!("file://{}", path_str);
+        let ns_url_str = NSString::from_str(&url_str);
+        let url = NSURL::URLWithString(&ns_url_str)
+            .ok_or_else(|| MetalKernelError::LoadLibraryError(
+                format!("Invalid metallib path: {}", path_str),
+            ))?;
+
         let raw = self
             .as_ref()
-            .newLibraryWithSource_options_error(&NSString::from_str(source), options)
-            .unwrap();
+            .newLibraryWithURL_error(&url)
+            .map_err(|e| MetalKernelError::LoadLibraryError(
+                format!("Failed to load metallib '{}': {}", path_str, e),
+            ))?;
 
         Ok(Library::new(raw))
     }
@@ -108,12 +164,15 @@ impl Device {
         let raw = self
             .as_ref()
             .newComputePipelineStateWithFunction_error(function.as_ref())
-            .unwrap();
+            .map_err(|e| MetalKernelError::FailedToCreatePipeline(e.to_string()))?;
         Ok(ComputePipeline::new(raw))
     }
 
     pub fn new_command_queue(&self) -> Result<CommandQueue, MetalKernelError> {
-        let raw = self.as_ref().newCommandQueue().unwrap();
+        let raw = self
+            .as_ref()
+            .newCommandQueue()
+            .ok_or(MetalKernelError::FailedToCreateResource("CommandQueue".to_string()))?;
         Ok(raw)
     }
 
