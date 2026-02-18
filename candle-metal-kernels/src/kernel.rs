@@ -1,3 +1,11 @@
+/// Safe stderr logging — never panics if stderr is unavailable (iOS).
+macro_rules! safe_log {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 use crate::source::{
     AFFINE, BINARY, CAST, CONV, FILL, INDEXING, MLX_GEMM, MLX_SORT, QUANTIZED, RANDOM, REDUCE,
     SDPA, SORT, TERNARY, UNARY,
@@ -104,7 +112,7 @@ impl Kernels {
     /// ```
     pub fn set_metallib_dir(&self, path: impl Into<PathBuf>) {
         let path = path.into();
-        eprintln!("[Candle] set_metallib_dir: {}", path.display());
+        safe_log!("[Candle] set_metallib_dir: {}", path.display());
         *self.metallib_dir.write().unwrap() = Some(path);
     }
 
@@ -172,16 +180,16 @@ impl Kernels {
         let filename = source.metallib_filename();
         let path = dir.join(filename);
         if path.exists() {
-            eprintln!("[Candle] Loading pre-compiled metallib: {}", path.display());
+            safe_log!("[Candle] Loading pre-compiled metallib: {}", path.display());
             let result = device.new_library_with_url(&path);
             if let Err(ref e) = result {
-                eprintln!("[Candle] FAILED to load metallib {}: {}", filename, e);
+                safe_log!("[Candle] FAILED to load metallib {}: {}", filename, e);
             } else {
-                eprintln!("[Candle] OK loaded metallib: {}", filename);
+                safe_log!("[Candle] OK loaded metallib: {}", filename);
             }
             Some(result)
         } else {
-            eprintln!("[Candle] metallib not found: {} (dir={})", path.display(), dir.display());
+            safe_log!("[Candle] metallib not found: {} (dir={})", path.display(), dir.display());
             None
         }
     }
@@ -192,15 +200,15 @@ impl Kernels {
         device: &Device,
         source: Source,
     ) -> Result<Library, MetalKernelError> {
-        eprintln!("[Candle] Compiling {:?} from source (runtime XPC compilation)...", source);
+        safe_log!("[Candle] Compiling {:?} from source (runtime XPC compilation)...", source);
         let source_content = self.get_library_source(source);
         let compile_options = get_compile_options();
         let result = device
             .new_library_with_source(source_content, Some(&compile_options))
             .map_err(|e| MetalKernelError::LoadLibraryError(e.to_string()));
         match &result {
-            Ok(_) => eprintln!("[Candle] Compiled {:?} OK", source),
-            Err(e) => eprintln!("[Candle] FAILED to compile {:?}: {}", source, e),
+            Ok(_) => safe_log!("[Candle] Compiled {:?} OK", source),
+            Err(e) => safe_log!("[Candle] FAILED to compile {:?}: {}", source, e),
         }
         result
     }

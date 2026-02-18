@@ -146,6 +146,13 @@ impl MetalDevice {
         Ok(())
     }
 
+    /// Release all Metal buffers from the pool that are no longer referenced
+    /// by any tensor. Call this after dropping model weights to reclaim GPU
+    /// memory — without it, buffers stay pooled for reuse indefinitely.
+    pub fn release_unused_buffers(&self) -> Result<()> {
+        self.drop_unused_buffers()
+    }
+
     pub fn command_encoder(&self) -> Result<ComputeCommandEncoder> {
         let commands = self.commands.write().map_err(MetalError::from)?;
         let (flush, command_encoder) = commands.command_encoder().map_err(MetalError::from)?;
