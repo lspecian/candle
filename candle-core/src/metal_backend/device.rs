@@ -185,6 +185,15 @@ impl MetalDevice {
         &self.device
     }
 
+    /// Returns the total number of bytes currently allocated by this Metal device.
+    ///
+    /// Useful for diagnosing memory leaks: if this value doesn't decrease after
+    /// dropping model weights and calling `release_unused_buffers()`, something
+    /// is still holding buffer references.
+    pub fn current_allocated_size(&self) -> usize {
+        self.device.current_allocated_size()
+    }
+
     /// Creates a new buffer (not necessarily zeroed).
     pub fn new_buffer(
         &self,
@@ -213,12 +222,43 @@ impl MetalDevice {
         Ok(Arc::new(buffer))
     }
 
-    /// Creates a new buffer from data.
+    /// Creates a new buffer from data, reusing a pooled buffer when possible.
     ///
-    /// Does not require synchronization, as [newBufferWithBytes](https://developer.apple.com/documentation/metal/mtldevice/1433429-newbufferwithbytes)
-    /// allocates the buffer and copies over the existing data before returning the MTLBuffer.
+    /// First checks the buffer pool for an unused buffer of at least `size` bytes.
+    /// If found, the data is copied into the existing Metal allocation, avoiding a
+    /// new `MTLDevice.newBufferWithBytes` call.  This is critical on iOS where
+    /// Metal's allocator retains freed pages — reusing the same buffer prevents
+    /// the 2× memory spike that occurs when old retained pages coexist with a
+    /// fresh allocation, which can trigger jetsam kills on memory-constrained
+    /// devices.
+    ///
+    /// If no suitable buffer is available, falls back to allocating a new one via
+    /// [newBufferWithBytes](https://developer.apple.com/documentation/metal/mtldevice/1433429-newbufferwithbytes).
     pub fn new_buffer_with_data<T>(&self, data: &[T]) -> Result<Arc<Buffer>> {
         let size = core::mem::size_of_val(data);
+
+        // Try to reuse an existing unused buffer from the pool.
+        // The write lock ensures exclusive access so two callers can't claim the
+        // same buffer (strong_count check + clone must be atomic w.r.t. the pool).
+        {
+            let buffers = self.buffers.write().map_err(MetalError::from)?;
+            if let Some(existing) = find_available_buffer(size, &buffers) {
+                // `existing` is an Arc clone (strong_count >= 2), so no other
+                // caller will see it as available.  Release the lock before the
+                // potentially large memcpy.
+                drop(buffers);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr() as *const u8,
+                        existing.contents(),
+                        size,
+                    );
+                }
+                return Ok(existing);
+            }
+        }
+
+        // No reusable buffer — allocate a fresh one from Metal.
         let new_buffer = self
             .device
             .new_buffer_with_data(data.as_ptr().cast(), size, RESOURCE_OPTIONS)
