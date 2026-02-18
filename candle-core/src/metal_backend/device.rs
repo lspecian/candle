@@ -224,7 +224,7 @@ impl MetalDevice {
 
     /// Creates a new buffer from data, reusing a pooled buffer when possible.
     ///
-    /// First checks the buffer pool for an unused buffer of at least `size` bytes.
+    /// Checks the buffer pool for an unused buffer of **exactly** `size` bytes.
     /// If found, the data is copied into the existing Metal allocation, avoiding a
     /// new `MTLDevice.newBufferWithBytes` call.  This is critical on iOS where
     /// Metal's allocator retains freed pages — reusing the same buffer prevents
@@ -232,29 +232,34 @@ impl MetalDevice {
     /// fresh allocation, which can trigger jetsam kills on memory-constrained
     /// devices.
     ///
+    /// Only exact-size matches are used (not "at least size") because callers may
+    /// depend on `buffer.length()` matching the data size.  When reloading the
+    /// same model, all tensor sizes are identical so exact matches are guaranteed.
+    ///
     /// If no suitable buffer is available, falls back to allocating a new one via
     /// [newBufferWithBytes](https://developer.apple.com/documentation/metal/mtldevice/1433429-newbufferwithbytes).
     pub fn new_buffer_with_data<T>(&self, data: &[T]) -> Result<Arc<Buffer>> {
         let size = core::mem::size_of_val(data);
 
-        // Try to reuse an existing unused buffer from the pool.
-        // The write lock ensures exclusive access so two callers can't claim the
-        // same buffer (strong_count check + clone must be atomic w.r.t. the pool).
+        // Try to reuse an existing unused buffer with exactly the same size.
+        // We only match exact sizes (not "at least size") to ensure
+        // buffer.length() == size, which downstream code may rely on.
         {
             let buffers = self.buffers.write().map_err(MetalError::from)?;
-            if let Some(existing) = find_available_buffer(size, &buffers) {
-                // `existing` is an Arc clone (strong_count >= 2), so no other
-                // caller will see it as available.  Release the lock before the
-                // potentially large memcpy.
-                drop(buffers);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data.as_ptr() as *const u8,
-                        existing.contents(),
-                        size,
-                    );
+            if let Some(subbuffers) = buffers.get(&size) {
+                // Find the first buffer with strong_count == 1 (only held by pool)
+                if let Some(reusable) = subbuffers.iter().find(|b| Arc::strong_count(*b) == 1) {
+                    let existing = reusable.clone(); // strong_count -> 2, no longer "available"
+                    drop(buffers); // Release lock before large memcpy
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr() as *const u8,
+                            existing.contents(),
+                            size,
+                        );
+                    }
+                    return Ok(existing);
                 }
-                return Ok(existing);
             }
         }
 
